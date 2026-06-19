@@ -48,6 +48,7 @@
 *.swp
 *.temp
 *.tmp
+tmp.json
 *.tsbuildinfo
 *~
 ./claude/checkpoints/
