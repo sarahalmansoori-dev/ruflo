@@ -1254,6 +1254,20 @@ export const codeIntelligenceTools: MCPTool[] = [
 ];
 
 /**
+ * Look up a tool by its registered name.
+ */
+export function getTool(name: string): MCPTool | undefined {
+  return codeIntelligenceTools.find((t) => t.name === name);
+}
+
+/**
+ * List all registered tool names.
+ */
+export function getToolNames(): string[] {
+  return codeIntelligenceTools.map((t) => t.name);
+}
+
+/**
  * Tool name to handler map
  */
 export const toolHandlers = new Map<string, MCPTool['handler']>([
