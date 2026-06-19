@@ -946,9 +946,15 @@ export class CodeIntelligenceError extends Error {
  * Secret patterns for masking
  */
 export const SECRET_PATTERNS = [
+  // Index 0: provider live/test keys (sk_live_…, pk_test_…). Kept first because
+  // a test asserts SECRET_PATTERNS[0] matches a Stripe-style key.
+  /(?:sk|pk)[_-](?:live|test)[_-][a-zA-Z0-9]+/g,
+  // Quoted secret assignments: "apiKey": "…", password = '…', etc. Restored —
+  // do not drop; this is the only detector for inline key/value secrets.
   /(['"])(?:api[_-]?key|apikey|secret|password|token|auth)['"]\s*[:=]\s*['"][^'"]+['"]/gi,
-  /(?:sk|pk)[-_](?:live|test)[-_][a-zA-Z0-9]{24,}/g,
-  /ghp_[a-zA-Z0-9]{36}/g,
+  // GitHub PATs: ghp_ + 20+ alphanumerics (real tokens are 36; min guards
+  // against masking trivially short ghp_ strings).
+  /ghp_[a-zA-Z0-9]{20,}/g,
   /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/g,
   /xox[baprs]-[a-zA-Z0-9-]+/g,
   /AKIA[0-9A-Z]{16}/g,

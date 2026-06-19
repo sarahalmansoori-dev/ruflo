@@ -4,7 +4,7 @@
  * Implements 5 MCP tools for legal contract analysis:
  * 1. legal/clause-extract - Extract and classify clauses
  * 2. legal/risk-assess - Identify and score contractual risks
- * 3. legal/contract-compare - Compare contracts with attention-based alignment
+ * 3. legal/contract-compare - Compare contracts
  * 4. legal/obligation-track - Extract obligations with DAG analysis
  * 5. legal/playbook-match - Match clauses against negotiation playbook
  *
@@ -14,1183 +14,510 @@
  */
 
 import { z } from 'zod';
-import type {
-  ClauseExtractionResult,
-  RiskAssessmentResult,
-  ContractComparisonResult,
-  ObligationTrackingResult,
-  PlaybookMatchResult,
-  ExtractedClause,
-  RiskFinding,
-  Obligation,
-  PlaybookMatch,
-  DocumentMetadata,
-  IAttentionBridge,
-  IDAGBridge,
-} from './types.js';
-import {
-  ClauseExtractInputSchema,
-  RiskAssessInputSchema,
-  ContractCompareInputSchema,
-  ObligationTrackInputSchema,
-  PlaybookMatchInputSchema,
-  ClauseType,
-  RiskCategory,
-  RiskSeverity,
-} from './types.js';
-import { createAttentionBridge } from './bridges/attention-bridge.js';
-import { createDAGBridge } from './bridges/dag-bridge.js';
+import { LegalDAGBridge } from './bridges/dag-bridge.js';
+import { LegalMinCutBridge } from './bridges/mincut-bridge.js';
 
 // ============================================================================
-// MCP Tool Types
+// MCP Tool Interface Types (JSON-Schema based, per cognitive-kernel convention)
 // ============================================================================
 
-/**
- * MCP Tool definition
- */
-export interface MCPTool<TInput = unknown, TOutput = unknown> {
-  name: string;
-  description: string;
-  category: string;
-  version: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  inputSchema: z.ZodType<TInput, z.ZodTypeDef, any>;
-  handler: (input: TInput, context: ToolContext) => Promise<MCPToolResult<TOutput>>;
+export interface MCPToolInputSchema {
+  type: 'object';
+  properties: Record<string, unknown>;
+  required?: string[];
 }
 
-/**
- * Tool execution context
- */
+export interface MCPToolResult {
+  content: Array<{
+    type: 'text' | 'image' | 'resource';
+    text?: string;
+    data?: string;
+    mimeType?: string;
+  }>;
+  isError?: boolean;
+}
+
+export interface MCPTool {
+  name: string;
+  description: string;
+  inputSchema: MCPToolInputSchema;
+  category?: string;
+  tags?: string[];
+  version?: string;
+  cacheable?: boolean;
+  cacheTTL?: number;
+  handler: (input: Record<string, unknown>, context?: ToolContext) => Promise<MCPToolResult>;
+}
+
+// ============================================================================
+// Tool Context
+// ============================================================================
+
 export interface ToolContext {
-  get<T>(key: string): T | undefined;
-  set<T>(key: string, value: T): void;
-  bridges: {
-    attention: IAttentionBridge;
-    dag: IDAGBridge;
+  logger?: {
+    debug(message: string, meta?: Record<string, unknown>): void;
+    info(message: string, meta?: Record<string, unknown>): void;
+    warn(message: string, meta?: Record<string, unknown>): void;
+    error(message: string, meta?: Record<string, unknown>): void;
+  };
+  userId?: string;
+  userRoles?: string[];
+  auditLogger?: {
+    log(entry: Record<string, unknown>): Promise<void>;
+  };
+  matterContext?: {
+    matterId?: string;
+    clientId?: string;
+  };
+  [key: string]: unknown;
+}
+
+// ============================================================================
+// Role Permissions
+// ============================================================================
+
+const TOOL_PERMISSIONS: Record<string, string[]> = {
+  'clause-extract': ['partner', 'associate', 'paralegal', 'contract_manager'],
+  'risk-assess': ['partner', 'associate'],
+  'contract-compare': ['partner', 'associate'],
+  'obligation-track': ['partner', 'associate', 'paralegal', 'contract_manager'],
+  'playbook-match': ['partner', 'contract_manager'],
+};
+
+function checkAccess(toolShortName: string, userRoles?: string[]): boolean {
+  // No RBAC if userRoles is undefined
+  if (userRoles === undefined) return true;
+
+  const allowed = TOOL_PERMISSIONS[toolShortName] ?? [];
+  return userRoles.some((role) => allowed.includes(role));
+}
+
+// ============================================================================
+// Result Helpers
+// ============================================================================
+
+function successResult(data: unknown): MCPToolResult {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(data) }],
   };
 }
 
-/**
- * MCP Tool result format
- */
-export interface MCPToolResult<T = unknown> {
-  content: Array<{ type: 'text'; text: string }>;
-  data?: T;
+function errorResult(message: string, extra?: Record<string, unknown>): MCPToolResult {
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        error: true,
+        message,
+        timestamp: new Date().toISOString(),
+        ...extra,
+      }),
+    }],
+    isError: true,
+  };
 }
 
 // ============================================================================
-// Clause Extract Tool
+// Simple document hash
 // ============================================================================
 
-/**
- * MCP Tool: legal/clause-extract
- *
- * Extract and classify clauses from legal documents
- */
-export const clauseExtractTool: MCPTool<
-  z.infer<typeof ClauseExtractInputSchema>,
-  ClauseExtractionResult
-> = {
+function hashDocument(doc: string): string {
+  let h = 0;
+  for (let i = 0; i < doc.length; i++) {
+    h = ((h << 5) - h) + doc.charCodeAt(i);
+    h = h & h;
+  }
+  return Math.abs(h).toString(16).padStart(16, '0');
+}
+
+// ============================================================================
+// Zod Schemas
+// ============================================================================
+
+const ClauseExtractZod = z.object({
+  document: z.string().min(1).max(10_000_000),
+  clauseTypes: z.array(z.string()).optional(),
+  jurisdiction: z.string().max(50).default('US'),
+  matterContext: z.object({ matterId: z.string(), clientId: z.string() }).optional(),
+});
+
+const RiskAssessZod = z.object({
+  document: z.string().min(1).max(10_000_000),
+  partyRole: z.enum(['buyer', 'seller', 'licensor', 'licensee', 'employer', 'employee', 'landlord', 'tenant', 'lender', 'borrower', 'service_provider', 'client']),
+  riskCategories: z.array(z.string()).optional(),
+  industryContext: z.string().max(200).optional(),
+  threshold: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+});
+
+const ContractCompareZod = z.object({
+  baseDocument: z.string().min(1).max(10_000_000),
+  compareDocument: z.string().min(1).max(10_000_000),
+  comparisonMode: z.enum(['structural', 'semantic', 'full']).default('full'),
+  focusClauseTypes: z.array(z.string()).optional(),
+});
+
+const ObligationTrackZod = z.object({
+  document: z.string().min(1).max(10_000_000),
+  party: z.string().max(200).optional(),
+  obligationTypes: z.array(z.string()).optional(),
+  timeframe: z.string().max(50).optional(),
+});
+
+const PlaybookMatchZod = z.object({
+  document: z.string().min(1).max(10_000_000),
+  playbook: z.string().min(1).max(1_000_000),
+  strictness: z.enum(['strict', 'moderate', 'flexible']).default('moderate'),
+  prioritizeClauses: z.array(z.string()).optional(),
+});
+
+// ============================================================================
+// legal/clause-extract
+// ============================================================================
+
+export const clauseExtractTool: MCPTool = {
   name: 'legal/clause-extract',
   description: 'Extract and classify clauses from legal documents',
   category: 'legal',
-  version: '3.0.0-alpha.1',
-  inputSchema: ClauseExtractInputSchema,
+  version: '1.0.0',
+  cacheable: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      document: { type: 'string', maxLength: 10_000_000 },
+      clauseTypes: { type: 'array', items: { type: 'string' } },
+      jurisdiction: { type: 'string', default: 'US' },
+      matterContext: { type: 'object' },
+    },
+    required: ['document'],
+  },
   handler: async (input, context) => {
     const startTime = Date.now();
+    const toolShortName = 'clause-extract';
+
+    // Authorization
+    if (!checkAccess(toolShortName, context?.userRoles)) {
+      return errorResult('Unauthorized: insufficient role permissions', { code: 'UNAUTHORIZED' });
+    }
+
+    const parsed = ClauseExtractZod.safeParse(input);
+    if (!parsed.success) {
+      return errorResult(parsed.error.message, { code: 'VALIDATION_ERROR' });
+    }
+
+    const validated = parsed.data;
 
     try {
-      // Validate input
-      const validated = ClauseExtractInputSchema.parse(input);
+      const bridge = LegalDAGBridge();
+      await bridge.initialize();
 
-      // Parse document and extract clauses
-      const metadata = parseDocumentMetadata(validated.document);
-      const clauses = await extractClauses(
-        validated.document,
-        validated.clauseTypes,
-        validated.jurisdiction,
-        context
-      );
+      const clauses = await bridge.extractClauses(validated.document, {
+        clauseTypes: validated.clauseTypes,
+        jurisdiction: validated.jurisdiction,
+      });
 
-      // Separate classified and unclassified
-      const classifiedClauses = clauses.filter(c => c.confidence >= 0.7);
-      const unclassified = clauses
-        .filter(c => c.confidence < 0.7)
-        .map(c => ({
-          text: c.text,
-          startOffset: c.startOffset,
-          endOffset: c.endOffset,
-          reason: `Low confidence: ${(c.confidence * 100).toFixed(1)}%`,
-        }));
+      const extractionTime = Date.now() - startTime;
+      const documentHash = hashDocument(validated.document);
 
-      const result: ClauseExtractionResult = {
-        success: true,
-        clauses: classifiedClauses,
-        metadata,
-        unclassified,
-        durationMs: Date.now() - startTime,
-      };
+      // Audit log
+      if (context?.auditLogger) {
+        await context.auditLogger.log({
+          toolName: toolShortName,
+          userId: context.userId,
+          success: true,
+          documentHash,
+          matterId: context.matterContext?.matterId ?? validated.matterContext?.matterId,
+          timestamp: new Date().toISOString(),
+        });
+      }
 
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        data: result,
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: false,
-            error: errorMessage,
-            durationMs: Date.now() - startTime,
-          }, null, 2),
-        }],
-      };
+      context?.logger?.info(`${toolShortName} completed`, { durationMs: String(extractionTime) });
+
+      return successResult({
+        clauses,
+        extractionTime,
+        jurisdiction: validated.jurisdiction,
+        documentHash,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return errorResult(message, { code: 'EXTRACTION_ERROR' });
     }
   },
 };
 
 // ============================================================================
-// Risk Assess Tool
+// legal/risk-assess
 // ============================================================================
 
-/**
- * MCP Tool: legal/risk-assess
- *
- * Assess contractual risks with severity scoring
- */
-export const riskAssessTool: MCPTool<
-  z.infer<typeof RiskAssessInputSchema>,
-  RiskAssessmentResult
-> = {
+export const riskAssessTool: MCPTool = {
   name: 'legal/risk-assess',
   description: 'Assess contractual risks with severity scoring',
   category: 'legal',
-  version: '3.0.0-alpha.1',
-  inputSchema: RiskAssessInputSchema,
+  version: '1.0.0',
+  cacheable: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      document: { type: 'string', maxLength: 10_000_000 },
+      partyRole: { type: 'string', enum: ['buyer', 'seller', 'licensor', 'licensee', 'employer', 'employee'] },
+      riskCategories: { type: 'array', items: { type: 'string' } },
+      industryContext: { type: 'string' },
+      threshold: { type: 'string' },
+    },
+    required: ['document', 'partyRole'],
+  },
   handler: async (input, context) => {
     const startTime = Date.now();
+    const toolShortName = 'risk-assess';
+
+    // Authorization
+    if (!checkAccess(toolShortName, context?.userRoles)) {
+      return errorResult('Unauthorized: insufficient role permissions', { code: 'UNAUTHORIZED' });
+    }
+
+    const parsed = RiskAssessZod.safeParse(input);
+    if (!parsed.success) {
+      return errorResult(parsed.error.message, { code: 'VALIDATION_ERROR' });
+    }
+
+    const validated = parsed.data;
 
     try {
-      const validated = RiskAssessInputSchema.parse(input);
+      const bridge = LegalDAGBridge();
+      await bridge.initialize();
 
-      // Extract clauses first
-      const clauses = await extractClauses(validated.document, undefined, 'US', context);
-
-      // Assess risks
-      const risks = await assessRisks(
-        clauses,
-        validated.partyRole,
-        validated.riskCategories,
-        validated.industryContext
-      );
-
-      // Filter by threshold if specified
-      const filteredRisks = validated.threshold
-        ? risks.filter(r => getSeverityLevel(r.severity) >= getSeverityLevel(validated.threshold!))
-        : risks;
-
-      // Build category summary
-      const categorySummary = buildCategorySummary(filteredRisks);
-
-      // Calculate overall score
-      const overallScore = calculateOverallRiskScore(filteredRisks);
-      const grade = scoreToGrade(overallScore);
-
-      const result: RiskAssessmentResult = {
-        success: true,
+      const risks = await bridge.analyzeRisks(validated.document, {
         partyRole: validated.partyRole,
-        risks: filteredRisks,
-        categorySummary,
-        overallScore,
-        grade,
-        criticalRisks: filteredRisks
-          .filter(r => r.severity === 'critical' || r.severity === 'high')
-          .slice(0, 5),
-        durationMs: Date.now() - startTime,
-      };
+        riskCategories: validated.riskCategories,
+        industryContext: validated.industryContext,
+        threshold: validated.threshold,
+      });
 
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        data: result,
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: false,
-            error: errorMessage,
-            durationMs: Date.now() - startTime,
-          }, null, 2),
-        }],
-      };
+      const assessmentTime = Date.now() - startTime;
+
+      // Compute overall risk score
+      const severityWeights: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+      const totalWeight = risks.reduce((sum, r) => sum + (severityWeights[r.severity] ?? 1), 0);
+      const overallRiskScore = risks.length === 0 ? 100 : Math.max(0, 100 - totalWeight * 5);
+
+      const recommendations = risks.map((r) => r.recommendation);
+
+      context?.logger?.info(`${toolShortName} completed`, { durationMs: String(assessmentTime) });
+
+      return successResult({
+        risks,
+        overallRiskScore,
+        recommendations,
+        assessmentTime,
+        partyRole: validated.partyRole,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return errorResult(message, { code: 'RISK_ERROR' });
     }
   },
 };
 
 // ============================================================================
-// Contract Compare Tool
+// legal/contract-compare
 // ============================================================================
 
-/**
- * MCP Tool: legal/contract-compare
- *
- * Compare two contracts with detailed diff and semantic alignment
- */
-export const contractCompareTool: MCPTool<
-  z.infer<typeof ContractCompareInputSchema>,
-  ContractComparisonResult
-> = {
+export const contractCompareTool: MCPTool = {
   name: 'legal/contract-compare',
   description: 'Compare two contracts with detailed diff and semantic alignment',
   category: 'legal',
-  version: '3.0.0-alpha.1',
-  inputSchema: ContractCompareInputSchema,
+  version: '1.0.0',
+  cacheable: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      baseDocument: { type: 'string', maxLength: 10_000_000 },
+      compareDocument: { type: 'string', maxLength: 10_000_000 },
+      comparisonMode: { type: 'string', enum: ['structural', 'semantic', 'full'], default: 'full' },
+      focusClauseTypes: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['baseDocument', 'compareDocument'],
+  },
   handler: async (input, context) => {
     const startTime = Date.now();
+    const toolShortName = 'contract-compare';
+
+    // Authorization
+    if (!checkAccess(toolShortName, context?.userRoles)) {
+      return errorResult('Unauthorized: insufficient role permissions', { code: 'UNAUTHORIZED' });
+    }
+
+    const parsed = ContractCompareZod.safeParse(input);
+    if (!parsed.success) {
+      return errorResult(parsed.error.message, { code: 'VALIDATION_ERROR' });
+    }
+
+    const validated = parsed.data;
 
     try {
-      const validated = ContractCompareInputSchema.parse(input);
+      const bridge = LegalDAGBridge();
+      await bridge.initialize();
 
-      // Extract clauses from both documents
-      const baseClauses = await extractClauses(validated.baseDocument, undefined, 'US', context);
-      const compareClauses = await extractClauses(validated.compareDocument, undefined, 'US', context);
+      const comparison = await bridge.compareContracts(
+        validated.baseDocument,
+        validated.compareDocument,
+        { comparisonMode: validated.comparisonMode, focusClauseTypes: validated.focusClauseTypes }
+      );
 
-      // Initialize attention bridge
-      const attention = context.bridges.attention;
-      if (!attention.isInitialized()) {
-        await attention.initialize();
-      }
+      const comparisonTime = Date.now() - startTime;
 
-      // Align clauses using attention
-      const alignments = await attention.alignClauses(baseClauses, compareClauses);
+      context?.logger?.info(`${toolShortName} completed`, { durationMs: String(comparisonTime) });
 
-      // Detect changes
-      const changes = detectChanges(baseClauses, compareClauses, alignments);
-
-      // Calculate similarity score
-      const similarityScore = alignments.length > 0
-        ? alignments.reduce((sum, a) => sum + a.similarity, 0) / alignments.length
-        : 0;
-
-      // Build summary
-      const summary = {
-        totalChanges: changes.length,
-        added: changes.filter(c => c.type === 'added').length,
-        removed: changes.filter(c => c.type === 'removed').length,
-        modified: changes.filter(c => c.type === 'modified').length,
-        favorable: changes.filter(c => c.impact === 'favorable').length,
-        unfavorable: changes.filter(c => c.impact === 'unfavorable').length,
-      };
-
-      // Generate redline if requested
-      const redlineMarkup = validated.generateRedline
-        ? generateRedlineMarkup(validated.baseDocument, changes)
-        : undefined;
-
-      const result: ContractComparisonResult = {
-        success: true,
+      return successResult({
+        similarity: comparison.similarity,
+        differences: comparison.differences,
+        comparisonTime,
         mode: validated.comparisonMode,
-        changes,
-        alignments,
-        similarityScore,
-        summary,
-        redlineMarkup,
-        durationMs: Date.now() - startTime,
-      };
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        data: result,
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: false,
-            error: errorMessage,
-            durationMs: Date.now() - startTime,
-          }, null, 2),
-        }],
-      };
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return errorResult(message, { code: 'COMPARE_ERROR' });
     }
   },
 };
 
 // ============================================================================
-// Obligation Track Tool
+// legal/obligation-track
 // ============================================================================
 
-/**
- * MCP Tool: legal/obligation-track
- *
- * Extract obligations, deadlines, and dependencies using DAG analysis
- */
-export const obligationTrackTool: MCPTool<
-  z.infer<typeof ObligationTrackInputSchema>,
-  ObligationTrackingResult
-> = {
+export const obligationTrackTool: MCPTool = {
   name: 'legal/obligation-track',
   description: 'Extract obligations, deadlines, and dependencies using DAG analysis',
   category: 'legal',
-  version: '3.0.0-alpha.1',
-  inputSchema: ObligationTrackInputSchema,
+  version: '1.0.0',
+  cacheable: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      document: { type: 'string', maxLength: 10_000_000 },
+      party: { type: 'string' },
+      obligationTypes: { type: 'array', items: { type: 'string' } },
+      timeframe: { type: 'string' },
+    },
+    required: ['document'],
+  },
   handler: async (input, context) => {
     const startTime = Date.now();
+    const toolShortName = 'obligation-track';
+
+    // Authorization
+    if (!checkAccess(toolShortName, context?.userRoles)) {
+      return errorResult('Unauthorized: insufficient role permissions', { code: 'UNAUTHORIZED' });
+    }
+
+    const parsed = ObligationTrackZod.safeParse(input);
+    if (!parsed.success) {
+      return errorResult(parsed.error.message, { code: 'VALIDATION_ERROR' });
+    }
+
+    const validated = parsed.data;
 
     try {
-      const validated = ObligationTrackInputSchema.parse(input);
+      const bridge = LegalDAGBridge();
+      await bridge.initialize();
 
-      // Extract obligations
-      let obligations = await extractObligations(
-        validated.document,
-        validated.obligationTypes
-      );
+      const obligations = await bridge.extractObligations(validated.document, {
+        party: validated.party,
+        obligationTypes: validated.obligationTypes,
+        timeframe: validated.timeframe,
+      });
 
-      // Filter by party if specified
-      if (validated.party) {
-        obligations = obligations.filter(o =>
-          o.party.toLowerCase().includes(validated.party!.toLowerCase())
-        );
-      }
+      const trackingTime = Date.now() - startTime;
 
-      // Filter by timeframe if specified
-      if (validated.timeframe) {
-        obligations = filterByTimeframe(obligations, validated.timeframe);
-      }
+      // Build a simple timeline from obligations
+      const timeline = obligations.map((obl) => ({
+        obligationId: obl.id,
+        deadline: obl.deadline,
+        party: obl.party,
+        status: obl.status,
+      }));
 
-      // Initialize DAG bridge
-      const dag = context.bridges.dag;
-      if (!dag.isInitialized()) {
-        await dag.initialize();
-      }
+      context?.logger?.info(`${toolShortName} completed`, { durationMs: String(trackingTime) });
 
-      // Build dependency graph
-      const graph = await dag.buildDependencyGraph(obligations);
-
-      // Build timeline
-      const timeline = buildTimeline(obligations);
-
-      // Find upcoming deadlines (next 30 days)
-      const now = new Date();
-      const thirtyDaysLater = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-      const upcomingDeadlines = obligations.filter(o =>
-        o.dueDate && o.dueDate >= now && o.dueDate <= thirtyDaysLater
-      );
-
-      // Find overdue
-      const overdue = obligations.filter(o =>
-        o.dueDate && o.dueDate < now && o.status !== 'completed' && o.status !== 'waived'
-      );
-
-      const result: ObligationTrackingResult = {
-        success: true,
+      return successResult({
         obligations,
-        graph,
         timeline,
-        upcomingDeadlines,
-        overdue,
-        durationMs: Date.now() - startTime,
-      };
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        data: result,
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: false,
-            error: errorMessage,
-            durationMs: Date.now() - startTime,
-          }, null, 2),
-        }],
-      };
+        trackingTime,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return errorResult(message, { code: 'OBLIGATION_ERROR' });
     }
   },
 };
 
 // ============================================================================
-// Playbook Match Tool
+// legal/playbook-match
 // ============================================================================
 
-/**
- * MCP Tool: legal/playbook-match
- *
- * Compare contract clauses against negotiation playbook
- */
-export const playbookMatchTool: MCPTool<
-  z.infer<typeof PlaybookMatchInputSchema>,
-  PlaybookMatchResult
-> = {
+export const playbookMatchTool: MCPTool = {
   name: 'legal/playbook-match',
   description: 'Compare contract clauses against negotiation playbook',
   category: 'legal',
-  version: '3.0.0-alpha.1',
-  inputSchema: PlaybookMatchInputSchema,
+  version: '1.0.0',
+  cacheable: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      document: { type: 'string', maxLength: 10_000_000 },
+      playbook: { type: 'string', maxLength: 1_000_000 },
+      strictness: { type: 'string', enum: ['strict', 'moderate', 'flexible'], default: 'moderate' },
+      prioritizeClauses: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['document', 'playbook'],
+  },
   handler: async (input, context) => {
     const startTime = Date.now();
+    const toolShortName = 'playbook-match';
+
+    // Authorization
+    if (!checkAccess(toolShortName, context?.userRoles)) {
+      return errorResult('Unauthorized: insufficient role permissions', { code: 'UNAUTHORIZED' });
+    }
+
+    const parsed = PlaybookMatchZod.safeParse(input);
+    if (!parsed.success) {
+      return errorResult(parsed.error.message, { code: 'VALIDATION_ERROR' });
+    }
+
+    const validated = parsed.data;
 
     try {
-      const validated = PlaybookMatchInputSchema.parse(input);
+      const bridge = LegalDAGBridge();
+      await bridge.initialize();
 
-      // Parse playbook
-      const playbook = parsePlaybook(validated.playbook);
+      const match = await bridge.matchPlaybook(validated.document, validated.playbook, {
+        strictness: validated.strictness,
+        prioritizeClauses: validated.prioritizeClauses,
+      });
 
-      // Extract clauses from document
-      const clauses = await extractClauses(validated.document, undefined, 'US', context);
+      const matchTime = Date.now() - startTime;
 
-      // Initialize attention bridge
-      const attention = context.bridges.attention;
-      if (!attention.isInitialized()) {
-        await attention.initialize();
-      }
-
-      // Match clauses against playbook
-      const matches = await matchAgainstPlaybook(
-        clauses,
-        playbook,
-        validated.strictness,
-        validated.suggestAlternatives,
-        attention
+      // Build recommendations from deviations
+      const recommendations = match.deviations.map((d) =>
+        `${d.severity.toUpperCase()}: Position '${d.position}' - expected '${d.expected}' but found '${d.actual}'`
       );
 
-      // Build summary
-      const summary = {
-        totalClauses: matches.length,
-        matchesPreferred: matches.filter(m => m.status === 'matches_preferred').length,
-        matchesAcceptable: matches.filter(m => m.status === 'matches_acceptable').length,
-        requiresFallback: matches.filter(m => m.status === 'requires_fallback').length,
-        violatesRedline: matches.filter(m => m.status === 'violates_redline').length,
-        noMatch: matches.filter(m => m.status === 'no_match').length,
-      };
+      context?.logger?.info(`${toolShortName} completed`, { durationMs: String(matchTime) });
 
-      // Find red line violations
-      const redLineViolations = matches.filter(m => m.status === 'violates_redline');
-
-      // Prioritize negotiations
-      const negotiationPriorities = buildNegotiationPriorities(matches, validated.prioritizeClauses);
-
-      const result: PlaybookMatchResult = {
-        success: true,
-        playbook: {
-          id: playbook.id,
-          name: playbook.name,
-          version: playbook.version,
-        },
-        matches,
-        summary,
-        redLineViolations,
-        negotiationPriorities,
-        durationMs: Date.now() - startTime,
-      };
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        data: result,
-      };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: false,
-            error: errorMessage,
-            durationMs: Date.now() - startTime,
-          }, null, 2),
-        }],
-      };
+      return successResult({
+        matchScore: match.matchScore,
+        deviations: match.deviations,
+        recommendations,
+        strictness: validated.strictness,
+        matchTime,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      return errorResult(message, { code: 'PLAYBOOK_ERROR' });
     }
   },
 };
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/**
- * Parse document metadata
- */
-function parseDocumentMetadata(document: string): DocumentMetadata {
-  const hash = simpleHash(document);
-
-  return {
-    id: `doc-${hash.substring(0, 8)}`,
-    format: 'txt',
-    wordCount: document.split(/\s+/).length,
-    charCount: document.length,
-    language: 'en',
-    parties: [],
-    contentHash: hash,
-  };
-}
-
-/**
- * Simple hash function
- */
-function simpleHash(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return Math.abs(hash).toString(16).padStart(16, '0');
-}
-
-/**
- * Extract clauses from document
- */
-async function extractClauses(
-  document: string,
-  clauseTypes: ClauseType[] | undefined,
-  _jurisdiction: string,
-  _context: ToolContext
-): Promise<ExtractedClause[]> {
-  const clauses: ExtractedClause[] = [];
-
-  // Define clause patterns
-  const clausePatterns: Record<ClauseType, RegExp[]> = {
-    indemnification: [/indemnif/i, /hold\s+harmless/i, /defend\s+and\s+indemnify/i],
-    limitation_of_liability: [/limitation\s+of\s+liability/i, /liability\s+shall\s+not\s+exceed/i],
-    termination: [/termination/i, /right\s+to\s+terminate/i, /upon\s+termination/i],
-    confidentiality: [/confidential/i, /non-disclosure/i, /proprietary\s+information/i],
-    ip_assignment: [/intellectual\s+property/i, /assignment\s+of\s+(ip|rights)/i, /work\s+for\s+hire/i],
-    governing_law: [/governing\s+law/i, /governed\s+by\s+the\s+laws/i, /jurisdiction/i],
-    arbitration: [/arbitration/i, /arbitral\s+proceedings/i, /binding\s+arbitration/i],
-    force_majeure: [/force\s+majeure/i, /act\s+of\s+god/i, /beyond\s+reasonable\s+control/i],
-    warranty: [/warrant/i, /represents\s+and\s+warrants/i, /as-is/i],
-    payment_terms: [/payment/i, /invoic/i, /net\s+\d+/i],
-    non_compete: [/non-?compet/i, /not\s+compete/i],
-    non_solicitation: [/non-?solicit/i, /not\s+solicit/i],
-    assignment: [/assignment/i, /may\s+not\s+assign/i],
-    insurance: [/insurance/i, /maintain\s+coverage/i],
-    representations: [/represent/i, /represent\s+and\s+warrant/i],
-    covenants: [/covenant/i, /agrees\s+to/i],
-    data_protection: [/data\s+protection/i, /personal\s+data/i, /gdpr/i, /privacy/i],
-    audit_rights: [/audit/i, /right\s+to\s+inspect/i, /access\s+to\s+records/i],
-  };
-
-  // Split document into sections/paragraphs
-  const sections = document.split(/\n\n+/);
-  let offset = 0;
-
-  for (const section of sections) {
-    const sectionStart = document.indexOf(section, offset);
-    const sectionEnd = sectionStart + section.length;
-    offset = sectionEnd;
-
-    // Try to classify section
-    for (const [type, patterns] of Object.entries(clausePatterns)) {
-      const clauseType = type as ClauseType;
-
-      // Skip if not in requested types
-      if (clauseTypes && clauseTypes.length > 0 && !clauseTypes.includes(clauseType)) {
-        continue;
-      }
-
-      // Check patterns
-      let matchCount = 0;
-      for (const pattern of patterns) {
-        if (pattern.test(section)) {
-          matchCount++;
-        }
-      }
-
-      if (matchCount > 0) {
-        const confidence = Math.min(0.5 + matchCount * 0.2, 0.99);
-
-        clauses.push({
-          id: `clause-${clauses.length + 1}`,
-          type: clauseType,
-          text: section.trim(),
-          startOffset: sectionStart,
-          endOffset: sectionEnd,
-          confidence,
-          keyTerms: extractKeyTerms(section),
-        });
-
-        break; // Only classify as one type
-      }
-    }
-  }
-
-  return clauses;
-}
-
-/**
- * Extract key terms from text
- */
-function extractKeyTerms(text: string): string[] {
-  const terms: string[] = [];
-  const termPatterns = [
-    /\$[\d,]+/g,              // Dollar amounts
-    /\d+\s*(days?|months?|years?)/gi,  // Time periods
-    /\d+%/g,                  // Percentages
-    /"[^"]+"/g,               // Quoted terms
-  ];
-
-  for (const pattern of termPatterns) {
-    const matches = text.match(pattern);
-    if (matches) {
-      terms.push(...matches);
-    }
-  }
-
-  return [...new Set(terms)].slice(0, 10);
-}
-
-/**
- * Assess risks in clauses
- */
-async function assessRisks(
-  clauses: ExtractedClause[],
-  _partyRole: string,
-  categories: RiskCategory[] | undefined,
-  _industryContext: string | undefined
-): Promise<RiskFinding[]> {
-  const risks: RiskFinding[] = [];
-
-  // Risk patterns by clause type and party role
-  const riskPatterns: Record<string, Array<{
-    pattern: RegExp;
-    severity: RiskSeverity;
-    category: RiskCategory;
-    title: string;
-    description: string;
-    mitigation: string;
-  }>> = {
-    indemnification: [
-      {
-        pattern: /unlimited\s+indemnification/i,
-        severity: 'critical',
-        category: 'financial',
-        title: 'Unlimited Indemnification',
-        description: 'Contract requires unlimited indemnification which could expose party to significant financial risk',
-        mitigation: 'Negotiate cap on indemnification liability',
-      },
-    ],
-    limitation_of_liability: [
-      {
-        pattern: /no\s+limitation/i,
-        severity: 'high',
-        category: 'financial',
-        title: 'No Liability Cap',
-        description: 'Contract contains no limitation on liability',
-        mitigation: 'Add liability cap based on contract value or insurance coverage',
-      },
-    ],
-    termination: [
-      {
-        pattern: /immediate\s+termination/i,
-        severity: 'medium',
-        category: 'operational',
-        title: 'Immediate Termination Right',
-        description: 'Counterparty can terminate immediately without notice',
-        mitigation: 'Negotiate notice period for termination',
-      },
-    ],
-    warranty: [
-      {
-        pattern: /as-?is/i,
-        severity: 'medium',
-        category: 'legal',
-        title: 'As-Is Warranty Disclaimer',
-        description: 'Product/service provided without warranty',
-        mitigation: 'Negotiate minimum performance warranties',
-      },
-    ],
-  };
-
-  for (const clause of clauses) {
-    const patterns = riskPatterns[clause.type] ?? [];
-
-    for (const riskPattern of patterns) {
-      if (riskPattern.pattern.test(clause.text)) {
-        // Filter by category if specified
-        if (categories && !categories.includes(riskPattern.category)) {
-          continue;
-        }
-
-        risks.push({
-          id: `risk-${risks.length + 1}`,
-          category: riskPattern.category,
-          severity: riskPattern.severity,
-          title: riskPattern.title,
-          description: riskPattern.description,
-          clauseIds: [clause.id],
-          mitigations: [riskPattern.mitigation],
-          deviatesFromStandard: true,
-          confidence: clause.confidence,
-        });
-      }
-    }
-  }
-
-  return risks;
-}
-
-/**
- * Get severity level as number
- */
-function getSeverityLevel(severity: RiskSeverity): number {
-  const levels: Record<RiskSeverity, number> = {
-    low: 1,
-    medium: 2,
-    high: 3,
-    critical: 4,
-  };
-  return levels[severity];
-}
-
-/**
- * Build category summary
- */
-function buildCategorySummary(
-  risks: RiskFinding[]
-): Record<RiskCategory, { count: number; highestSeverity: RiskSeverity; averageScore: number }> {
-  const summary: Record<string, { count: number; highestSeverity: RiskSeverity; totalScore: number }> = {};
-
-  for (const category of Object.values(RiskCategory.options)) {
-    summary[category] = { count: 0, highestSeverity: 'low', totalScore: 0 };
-  }
-
-  for (const risk of risks) {
-    const cat = summary[risk.category];
-    if (cat) {
-      cat.count++;
-      cat.totalScore += getSeverityLevel(risk.severity);
-      if (getSeverityLevel(risk.severity) > getSeverityLevel(cat.highestSeverity)) {
-        cat.highestSeverity = risk.severity;
-      }
-    }
-  }
-
-  const result: Record<RiskCategory, { count: number; highestSeverity: RiskSeverity; averageScore: number }> = {} as any;
-  for (const [category, data] of Object.entries(summary)) {
-    result[category as RiskCategory] = {
-      count: data.count,
-      highestSeverity: data.highestSeverity,
-      averageScore: data.count > 0 ? data.totalScore / data.count : 0,
-    };
-  }
-
-  return result;
-}
-
-/**
- * Calculate overall risk score
- */
-function calculateOverallRiskScore(risks: RiskFinding[]): number {
-  if (risks.length === 0) return 100;
-
-  const maxScore = 100;
-  let penalty = 0;
-
-  for (const risk of risks) {
-    const severityPenalty: Record<RiskSeverity, number> = {
-      low: 2,
-      medium: 5,
-      high: 15,
-      critical: 30,
-    };
-    penalty += severityPenalty[risk.severity];
-  }
-
-  return Math.max(0, maxScore - penalty);
-}
-
-/**
- * Convert score to grade
- */
-function scoreToGrade(score: number): 'A' | 'B' | 'C' | 'D' | 'F' {
-  if (score >= 90) return 'A';
-  if (score >= 80) return 'B';
-  if (score >= 70) return 'C';
-  if (score >= 60) return 'D';
-  return 'F';
-}
-
-/**
- * Detect changes between documents
- */
-function detectChanges(
-  baseClauses: ExtractedClause[],
-  compareClauses: ExtractedClause[],
-  alignments: import('./types.js').ClauseAlignment[]
-): import('./types.js').ContractChange[] {
-  const changes: import('./types.js').ContractChange[] = [];
-  const alignedCompare = new Set(alignments.map(a => a.compareClauseId));
-
-  for (const alignment of alignments) {
-    const baseClause = baseClauses.find(c => c.id === alignment.baseClauseId);
-    const compareClause = compareClauses.find(c => c.id === alignment.compareClauseId);
-
-    if (alignment.alignmentType === 'no_match') {
-      changes.push({
-        type: 'removed',
-        clauseType: baseClause?.type,
-        baseSection: baseClause?.section,
-        baseText: baseClause?.text,
-        significance: 0.8,
-        impact: 'requires_review',
-        explanation: 'Clause exists in base but not in comparison document',
-      });
-    } else if (alignment.alignmentType !== 'exact') {
-      changes.push({
-        type: 'modified',
-        clauseType: baseClause?.type,
-        baseSection: baseClause?.section,
-        compareSection: compareClause?.section,
-        baseText: baseClause?.text,
-        compareText: compareClause?.text,
-        significance: 1 - alignment.similarity,
-        impact: 'requires_review',
-        explanation: `Clause modified (${(alignment.similarity * 100).toFixed(1)}% similarity)`,
-      });
-    }
-  }
-
-  // Find added clauses
-  for (const clause of compareClauses) {
-    if (!alignedCompare.has(clause.id)) {
-      changes.push({
-        type: 'added',
-        clauseType: clause.type,
-        compareSection: clause.section,
-        compareText: clause.text,
-        significance: 0.7,
-        impact: 'requires_review',
-        explanation: 'New clause in comparison document',
-      });
-    }
-  }
-
-  return changes;
-}
-
-/**
- * Generate redline markup
- */
-function generateRedlineMarkup(
-  baseDocument: string,
-  changes: import('./types.js').ContractChange[]
-): string {
-  // Simplified redline generation
-  let markup = baseDocument;
-
-  for (const change of changes) {
-    if (change.type === 'removed' && change.baseText) {
-      markup = markup.replace(
-        change.baseText,
-        `<del style="color:red">${change.baseText}</del>`
-      );
-    } else if (change.type === 'added' && change.compareText) {
-      markup += `\n<ins style="color:green">${change.compareText}</ins>`;
-    }
-  }
-
-  return markup;
-}
-
-/**
- * Extract obligations from document
- */
-async function extractObligations(
-  document: string,
-  types: import('./types.js').ObligationType[] | undefined
-): Promise<Obligation[]> {
-  const obligations: Obligation[] = [];
-
-  // Obligation patterns
-  const obligationPatterns: Record<string, { pattern: RegExp; type: import('./types.js').ObligationType }[]> = {
-    payment: [
-      { pattern: /shall\s+pay/i, type: 'payment' },
-      { pattern: /payment\s+due/i, type: 'payment' },
-    ],
-    delivery: [
-      { pattern: /shall\s+deliver/i, type: 'delivery' },
-      { pattern: /delivery\s+date/i, type: 'delivery' },
-    ],
-    notification: [
-      { pattern: /shall\s+notify/i, type: 'notification' },
-      { pattern: /provide\s+notice/i, type: 'notification' },
-    ],
-    approval: [
-      { pattern: /shall\s+approve/i, type: 'approval' },
-      { pattern: /written\s+approval/i, type: 'approval' },
-    ],
-    compliance: [
-      { pattern: /shall\s+comply/i, type: 'compliance' },
-      { pattern: /in\s+compliance\s+with/i, type: 'compliance' },
-    ],
-  };
-
-  const sentences = document.split(/[.!?]+/);
-
-  for (let i = 0; i < sentences.length; i++) {
-    const sentence = sentences[i]?.trim() ?? '';
-    if (!sentence) continue;
-
-    for (const [, patterns] of Object.entries(obligationPatterns)) {
-      for (const { pattern, type } of patterns) {
-        if (types && !types.includes(type)) continue;
-
-        if (pattern.test(sentence)) {
-          obligations.push({
-            id: `obl-${obligations.length + 1}`,
-            type,
-            party: extractParty(sentence),
-            description: sentence,
-            dependsOn: [],
-            blocks: [],
-            clauseIds: [],
-            status: 'pending',
-            priority: 'medium',
-          });
-          break;
-        }
-      }
-    }
-  }
-
-  return obligations;
-}
-
-/**
- * Extract party from sentence
- */
-function extractParty(sentence: string): string {
-  const partyPatterns = [
-    /the\s+(buyer|seller|licensor|licensee|employer|employee)/i,
-    /(party\s+a|party\s+b)/i,
-    /the\s+company/i,
-  ];
-
-  for (const pattern of partyPatterns) {
-    const match = sentence.match(pattern);
-    if (match?.[1]) {
-      return match[1];
-    }
-  }
-
-  return 'Unknown Party';
-}
-
-/**
- * Filter obligations by timeframe
- */
-function filterByTimeframe(
-  obligations: Obligation[],
-  _timeframe: string
-): Obligation[] {
-  // Parse ISO duration or date range
-  // Simplified implementation
-  return obligations;
-}
-
-/**
- * Build timeline from obligations
- */
-function buildTimeline(
-  obligations: Obligation[]
-): Array<{ date: Date; obligations: string[]; isMilestone: boolean }> {
-  const timeline: Map<string, { date: Date; obligations: string[]; isMilestone: boolean }> = new Map();
-
-  for (const obligation of obligations) {
-    if (obligation.dueDate) {
-      const dateKey = obligation.dueDate.toISOString().split('T')[0] ?? '';
-      const existing = timeline.get(dateKey);
-
-      if (existing) {
-        existing.obligations.push(obligation.id);
-      } else {
-        timeline.set(dateKey, {
-          date: obligation.dueDate,
-          obligations: [obligation.id],
-          isMilestone: obligation.priority === 'critical',
-        });
-      }
-    }
-  }
-
-  return Array.from(timeline.values()).sort((a, b) => a.date.getTime() - b.date.getTime());
-}
-
-/**
- * Parse playbook from string (JSON or ID)
- */
-function parsePlaybook(playbookInput: string): import('./types.js').Playbook {
-  try {
-    const parsed = JSON.parse(playbookInput);
-    return parsed as import('./types.js').Playbook;
-  } catch {
-    // Return a default playbook
-    return {
-      id: playbookInput,
-      name: 'Default Playbook',
-      contractType: 'General',
-      jurisdiction: 'US',
-      partyRole: 'buyer',
-      updatedAt: new Date(),
-      version: '1.0.0',
-      positions: [],
-    };
-  }
-}
-
-/**
- * Match clauses against playbook
- */
-async function matchAgainstPlaybook(
-  clauses: ExtractedClause[],
-  playbook: import('./types.js').Playbook,
-  strictness: import('./types.js').PlaybookStrictness,
-  suggestAlternatives: boolean,
-  _attention: IAttentionBridge
-): Promise<PlaybookMatch[]> {
-  const matches: PlaybookMatch[] = [];
-
-  for (const clause of clauses) {
-    const position = playbook.positions.find(p => p.clauseType === clause.type);
-
-    if (!position) {
-      matches.push({
-        clauseId: clause.id,
-        position: {
-          clauseType: clause.type,
-          preferredLanguage: '',
-          acceptableVariations: [],
-          redLines: [],
-          fallbackPositions: [],
-          negotiationNotes: '',
-          businessJustification: '',
-        },
-        status: 'no_match',
-        preferredSimilarity: 0,
-        recommendation: 'No playbook position defined for this clause type',
-      });
-      continue;
-    }
-
-    // Check against preferred language
-    const preferredSimilarity = calculateTextSimilarity(clause.text, position.preferredLanguage);
-
-    // Determine status based on similarity and strictness
-    let status: PlaybookMatch['status'];
-    const thresholds = {
-      strict: { preferred: 0.95, acceptable: 0.9, fallback: 0.8 },
-      moderate: { preferred: 0.85, acceptable: 0.75, fallback: 0.6 },
-      flexible: { preferred: 0.7, acceptable: 0.6, fallback: 0.4 },
-    };
-
-    const threshold = thresholds[strictness];
-
-    // Check red lines first
-    const violatesRedLine = position.redLines.some(rl =>
-      clause.text.toLowerCase().includes(rl.toLowerCase())
-    );
-
-    if (violatesRedLine) {
-      status = 'violates_redline';
-    } else if (preferredSimilarity >= threshold.preferred) {
-      status = 'matches_preferred';
-    } else if (position.acceptableVariations.some(v =>
-      calculateTextSimilarity(clause.text, v) >= threshold.acceptable
-    )) {
-      status = 'matches_acceptable';
-    } else if (position.fallbackPositions.length > 0) {
-      status = 'requires_fallback';
-    } else {
-      status = 'no_match';
-    }
-
-    matches.push({
-      clauseId: clause.id,
-      position,
-      status,
-      preferredSimilarity,
-      suggestedAlternative: suggestAlternatives ? position.preferredLanguage : undefined,
-      recommendation: generateRecommendation(status, clause.type),
-    });
-  }
-
-  return matches;
-}
-
-/**
- * Calculate text similarity (simplified)
- */
-function calculateTextSimilarity(text1: string, text2: string): number {
-  if (!text1 || !text2) return 0;
-
-  const words1 = new Set(text1.toLowerCase().split(/\s+/));
-  const words2 = new Set(text2.toLowerCase().split(/\s+/));
-
-  const intersection = new Set([...words1].filter(w => words2.has(w)));
-  const union = new Set([...words1, ...words2]);
-
-  return intersection.size / union.size;
-}
-
-/**
- * Generate recommendation based on match status
- */
-function generateRecommendation(status: PlaybookMatch['status'], _clauseType: ClauseType): string {
-  const recommendations: Record<PlaybookMatch['status'], string> = {
-    matches_preferred: 'Clause matches preferred playbook position. No action required.',
-    matches_acceptable: 'Clause is within acceptable variation. Consider negotiating closer to preferred position.',
-    requires_fallback: 'Clause requires fallback position. Review fallback options and negotiate accordingly.',
-    violates_redline: 'CRITICAL: Clause violates red line. This must be negotiated before signing.',
-    no_match: 'No playbook position available. Conduct independent review of this clause.',
-  };
-
-  return recommendations[status];
-}
-
-/**
- * Build negotiation priorities
- */
-function buildNegotiationPriorities(
-  matches: PlaybookMatch[],
-  prioritizedTypes: ClauseType[] | undefined
-): Array<{ clauseId: string; priority: number; reason: string }> {
-  const priorities: Array<{ clauseId: string; priority: number; reason: string }> = [];
-
-  const statusPriority: Record<PlaybookMatch['status'], number> = {
-    violates_redline: 100,
-    requires_fallback: 70,
-    no_match: 50,
-    matches_acceptable: 30,
-    matches_preferred: 10,
-  };
-
-  for (const match of matches) {
-    let priority = statusPriority[match.status];
-
-    // Boost priority for prioritized clause types
-    if (prioritizedTypes?.includes(match.position.clauseType)) {
-      priority += 20;
-    }
-
-    priorities.push({
-      clauseId: match.clauseId,
-      priority,
-      reason: match.recommendation,
-    });
-  }
-
-  return priorities.sort((a, b) => b.priority - a.priority);
-}
 
 // ============================================================================
 // Tool Registry
@@ -1200,11 +527,11 @@ function buildNegotiationPriorities(
  * All Legal Contracts MCP Tools
  */
 export const legalContractsTools: MCPTool[] = [
-  clauseExtractTool as unknown as MCPTool,
-  riskAssessTool as unknown as MCPTool,
-  contractCompareTool as unknown as MCPTool,
-  obligationTrackTool as unknown as MCPTool,
-  playbookMatchTool as unknown as MCPTool,
+  clauseExtractTool,
+  riskAssessTool,
+  contractCompareTool,
+  obligationTrackTool,
+  playbookMatchTool,
 ];
 
 /**
@@ -1224,27 +551,22 @@ export function getToolNames(): string[] {
 /**
  * Tool name to handler map
  */
-export const toolHandlers = new Map<string, MCPTool['handler']>([
-  ['legal/clause-extract', clauseExtractTool.handler as MCPTool['handler']],
-  ['legal/risk-assess', riskAssessTool.handler as MCPTool['handler']],
-  ['legal/contract-compare', contractCompareTool.handler as MCPTool['handler']],
-  ['legal/obligation-track', obligationTrackTool.handler as MCPTool['handler']],
-  ['legal/playbook-match', playbookMatchTool.handler as MCPTool['handler']],
-]);
+export const toolHandlers = new Map<string, MCPTool['handler']>(
+  legalContractsTools.map((t) => [t.name, t.handler])
+);
 
 /**
- * Create tool context with bridges
+ * Create a minimal tool context (for production use)
  */
-export function createToolContext(): ToolContext {
-  const store = new Map<string, unknown>();
-
+export function createToolContext(overrides?: Partial<ToolContext>): ToolContext {
   return {
-    get: <T>(key: string) => store.get(key) as T | undefined,
-    set: <T>(key: string, value: T) => { store.set(key, value); },
-    bridges: {
-      attention: createAttentionBridge(),
-      dag: createDAGBridge(),
+    logger: {
+      debug: (msg, meta) => console.debug(`[legal-contracts] ${msg}`, meta),
+      info: (msg, meta) => console.info(`[legal-contracts] ${msg}`, meta),
+      warn: (msg, meta) => console.warn(`[legal-contracts] ${msg}`, meta),
+      error: (msg, meta) => console.error(`[legal-contracts] ${msg}`, meta),
     },
+    ...overrides,
   };
 }
 

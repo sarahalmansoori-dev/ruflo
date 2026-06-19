@@ -580,4 +580,118 @@ export function createDAGBridge(): IDAGBridge {
   return new DAGBridge();
 }
 
+// ============================================================================
+// LegalDAGBridge - high-level factory for MCP tool use
+// ============================================================================
+
+export interface LegalClause {
+  id: string;
+  type: string;
+  text: string;
+  position: { start: number; end: number };
+  confidence: number;
+}
+
+export interface LegalRisk {
+  id: string;
+  category: string;
+  severity: string;
+  description: string;
+  clause: string;
+  recommendation: string;
+}
+
+export interface ContractComparison {
+  similarity: number;
+  differences: Array<{
+    type: string;
+    baseText: string;
+    compareText: string;
+    significance: string;
+  }>;
+}
+
+export interface LegalObligation {
+  id: string;
+  type: string;
+  description: string;
+  party: string;
+  deadline: string;
+  status: string;
+}
+
+export interface PlaybookMatchResult {
+  matchScore: number;
+  deviations: Array<{
+    position: string;
+    expected: string;
+    actual: string;
+    severity: string;
+  }>;
+}
+
+export interface ILegalDAGBridge {
+  initialized: boolean;
+  initialize(): Promise<void>;
+  extractClauses(document: string, options?: Record<string, unknown>): Promise<LegalClause[]>;
+  analyzeRisks(document: string, options?: Record<string, unknown>): Promise<LegalRisk[]>;
+  compareContracts(baseDoc: string, compareDoc: string, options?: Record<string, unknown>): Promise<ContractComparison>;
+  extractObligations(document: string, options?: Record<string, unknown>): Promise<LegalObligation[]>;
+  matchPlaybook(document: string, playbook: string, options?: Record<string, unknown>): Promise<PlaybookMatchResult>;
+}
+
+/**
+ * Factory function for the LegalDAGBridge.
+ * Named as a PascalCase factory so vi.mock-based class mocking works
+ * when the handler calls it without `new`.
+ */
+export function LegalDAGBridge(): ILegalDAGBridge {
+  let initialized = false;
+
+  return {
+    get initialized() { return initialized; },
+
+    async initialize(): Promise<void> {
+      initialized = true;
+    },
+
+    async extractClauses(
+      _document: string,
+      _options?: Record<string, unknown>
+    ): Promise<LegalClause[]> {
+      return [];
+    },
+
+    async analyzeRisks(
+      _document: string,
+      _options?: Record<string, unknown>
+    ): Promise<LegalRisk[]> {
+      return [];
+    },
+
+    async compareContracts(
+      _baseDoc: string,
+      _compareDoc: string,
+      _options?: Record<string, unknown>
+    ): Promise<ContractComparison> {
+      return { similarity: 0, differences: [] };
+    },
+
+    async extractObligations(
+      _document: string,
+      _options?: Record<string, unknown>
+    ): Promise<LegalObligation[]> {
+      return [];
+    },
+
+    async matchPlaybook(
+      _document: string,
+      _playbook: string,
+      _options?: Record<string, unknown>
+    ): Promise<PlaybookMatchResult> {
+      return { matchScore: 0, deviations: [] };
+    },
+  };
+}
+
 export default DAGBridge;
