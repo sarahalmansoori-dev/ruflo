@@ -49,6 +49,9 @@
 *.temp
 *.tmp
 *.tsbuildinfo
+# Test-generated artifacts (not the tracked agentdb.rvf / data/*.rvf data files)
+/test-database-provider.rvf
+/tests/.tmp-ctx-test/
 *~
 ./claude/checkpoints/
 .DS_Store
