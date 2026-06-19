@@ -148,7 +148,12 @@ export class SonaBridge {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const wasmModule = await (import('@ruvector/sona' as any) as Promise<unknown>).catch(() => null);
 
-      if (wasmModule) {
+      // Only adopt the imported module if it conforms to the flat SonaModule
+      // interface this bridge expects. The installed @ruvector/sona exposes a
+      // different (SonaEngine-based NAPI) shape, so a bare truthy check would
+      // wrongly adopt an incompatible module and crash on setMode(). Fall back
+      // to the in-process mock whenever the expected interface isn't present.
+      if (wasmModule && typeof (wasmModule as { setMode?: unknown }).setMode === 'function') {
         this._module = wasmModule as unknown as SonaModule;
       } else {
         this._module = this.createMockModule();
