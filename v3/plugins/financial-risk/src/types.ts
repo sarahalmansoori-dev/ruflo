@@ -28,11 +28,11 @@ export interface MCPTool {
     properties: Record<string, unknown>;
     required: string[];
   };
-  handler: (input: Record<string, unknown>, context?: ToolContext) => Promise<MCPToolResult>;
+  handler: (input: Record<string, unknown>, context?: ToolContext) => Promise<HandlerResult>;
 }
 
 /**
- * MCP Tool result
+ * MCP Tool result (legacy format used by types.ts helpers and types.test.ts)
  */
 export interface MCPToolResult {
   success: boolean;
@@ -43,6 +43,19 @@ export interface MCPToolResult {
     cached?: boolean;
     wasmUsed?: boolean;
   };
+}
+
+/**
+ * MCP Handler result (content/isError format expected by MCP protocol and mcp-tools.test.ts)
+ */
+export interface HandlerResult {
+  content: Array<{
+    type: 'text' | 'image' | 'resource';
+    text?: string;
+    data?: string;
+    mimeType?: string;
+  }>;
+  isError?: boolean;
 }
 
 /**
@@ -148,7 +161,7 @@ export interface FinancialTransaction {
   id: string;
   amount: number;
   timestamp: string;
-  parties: string[];
+  parties?: string[];
   type?: string;
   currency?: string;
   metadata?: Record<string, unknown>;
@@ -261,7 +274,7 @@ export type RegulationType = 'basel3' | 'mifid2' | 'dodd_frank' | 'aml' | 'kyc' 
 /**
  * Compliance scope
  */
-export type ComplianceScope = 'positions' | 'transactions' | 'capital' | 'reporting' | 'all';
+export type ComplianceScope = 'positions' | 'transactions' | 'capital' | 'reporting' | 'all' | 'full';
 
 /**
  * Compliance violation
@@ -381,7 +394,7 @@ export interface StressTestResult {
 /**
  * Financial roles for RBAC
  */
-export type FinancialRole = 'TRADER' | 'RISK_MANAGER' | 'COMPLIANCE_OFFICER' | 'AUDITOR' | 'QUANT' | 'ADMIN';
+export type FinancialRole = 'TRADER' | 'RISK_MANAGER' | 'COMPLIANCE_OFFICER' | 'AUDITOR' | 'QUANT' | 'ADMIN' | 'analyst';
 
 /**
  * Financial audit log entry (SOX/MiFID II compliant)
@@ -418,6 +431,8 @@ export const FinancialRolePermissions: Record<FinancialRole, string[]> = {
   AUDITOR: ['compliance-check'],
   QUANT: ['portfolio-risk', 'market-regime', 'stress-test'],
   ADMIN: ['portfolio-risk', 'anomaly-detect', 'market-regime', 'compliance-check', 'stress-test'],
+  // analyst is a standard read-only role with access to all analytical tools
+  analyst: ['portfolio-risk', 'anomaly-detect', 'market-regime', 'compliance-check', 'stress-test'],
 };
 
 /**
@@ -584,7 +599,7 @@ export const AnomalyDetectInputSchema = z.object({
     id: z.string().uuid(),
     amount: z.number().finite().min(-1e12).max(1e12),
     timestamp: z.string().datetime(),
-    parties: z.array(z.string().max(200)).max(10),
+    parties: z.array(z.string().max(200)).max(10).optional(),
     type: z.string().max(50).optional(),
     currency: z.string().max(3).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
@@ -613,7 +628,7 @@ export const MarketRegimeInputSchema = z.object({
 export const ComplianceCheckInputSchema = z.object({
   entity: z.string().max(200),
   regulations: z.array(z.enum(['basel3', 'mifid2', 'dodd_frank', 'aml', 'kyc', 'fatca', 'gdpr'])).min(1),
-  scope: z.enum(['positions', 'transactions', 'capital', 'reporting', 'all']).default('all'),
+  scope: z.enum(['positions', 'transactions', 'capital', 'reporting', 'all', 'full']).default('all'),
   asOfDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
 

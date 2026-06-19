@@ -113,7 +113,7 @@ export class AnomalyDetector {
       return [
         Math.log(Math.abs(txn.amount) + 1), // Log-scaled amount
         txn.amount < 0 ? 1 : 0, // Debit indicator
-        txn.parties.length, // Number of parties
+        (txn.parties ?? []).length, // Number of parties
         hour / 24, // Normalized hour
         dayOfWeek / 7, // Normalized day of week
         txn.amount > 10000 ? 1 : 0, // Large transaction flag
@@ -157,7 +157,7 @@ export class AnomalyDetector {
 
   private classifyAnomalyType(txn: FinancialTransaction, score: number): string {
     if (Math.abs(txn.amount) > 100000) return 'large_transaction';
-    if (txn.parties.length > 5) return 'multi_party';
+    if ((txn.parties ?? []).length > 5) return 'multi_party';
     if (score > 0.9) return 'pattern_deviation';
     return 'unusual_activity';
   }
@@ -171,7 +171,7 @@ export class AnomalyDetector {
     const indicators: string[] = [];
 
     if (Math.abs(txn.amount) > 10000) indicators.push('large_amount');
-    if (txn.parties.length > 3) indicators.push('multiple_parties');
+    if ((txn.parties ?? []).length > 3) indicators.push('multiple_parties');
 
     const hour = new Date(txn.timestamp).getHours();
     if (hour < 6 || hour > 22) indicators.push('unusual_time');
