@@ -281,12 +281,9 @@ export class CognitiveBridge {
       },
 
       retrieve(id: string): CognitiveItem | null {
-        const item = workingMemory.get(id);
-        if (item) {
-          // Boost salience on retrieval
-          item.salience = Math.min(1, item.salience + 0.1);
-        }
-        return item ?? null;
+        // Retrieval is non-mutating: return the stored item with its salience
+        // unchanged (boosting on read corrupts decay/eviction semantics).
+        return workingMemory.get(id) ?? null;
       },
 
       search(query: Float32Array, k: number): CognitiveItem[] {
@@ -305,9 +302,12 @@ export class CognitiveBridge {
       },
 
       decay(deltaTime: number): void {
-        const decayRate = self.config.decayRate * deltaTime;
+        // deltaTime is in milliseconds; normalize to seconds so a 1s tick
+        // applies the configured per-second decayRate rather than multiplying
+        // it by 1000 (which drove salience negative and evicted everything).
+        const decayRate = self.config.decayRate * (deltaTime / 1000);
         for (const [id, item] of workingMemory) {
-          item.salience *= 1 - decayRate * item.decay;
+          item.salience *= Math.max(0, 1 - decayRate * item.decay);
           if (item.salience < 0.1) {
             workingMemory.delete(id);
           }
@@ -323,10 +323,13 @@ export class CognitiveBridge {
       },
 
       focus(ids: string[]): AttentionState {
+        // Only items actually held in working memory can receive focus;
+        // non-existent ids are dropped rather than fabricated into focus.
+        const present = ids.filter((id) => workingMemory.has(id));
         attentionState = {
-          focus: ids,
-          breadth: 1 / Math.max(1, ids.length),
-          intensity: Math.min(1, 0.5 + ids.length * 0.1),
+          focus: present,
+          breadth: 1 / Math.max(1, present.length),
+          intensity: Math.min(1, 0.5 + present.length * 0.1),
           distractors: [],
         };
         return attentionState;

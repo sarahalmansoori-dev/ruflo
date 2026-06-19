@@ -98,53 +98,52 @@ async function workingMemoryHandler(
 
     switch (action) {
       case 'allocate': {
-        if (!slot?.id) {
-          const newId = `slot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          const newSlot: WorkingMemorySlot = {
-            id: newId,
-            content: slot?.content ?? null,
-            priority: slot?.priority ?? 0.5,
-            decay: slot?.decay ?? 0.1,
-            createdAt: Date.now(),
-            accessCount: 0,
-            lastAccessed: Date.now(),
-          };
+        // Use the caller-supplied slot id when provided (named allocation);
+        // otherwise generate one.
+        const newId = slot?.id ?? `slot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const newSlot: WorkingMemorySlot = {
+          id: newId,
+          content: slot?.content ?? null,
+          priority: slot?.priority ?? 0.5,
+          decay: slot?.decay ?? 0.1,
+          createdAt: Date.now(),
+          accessCount: 0,
+          lastAccessed: Date.now(),
+        };
 
-          // Check capacity (Miller's Law: 7 +/- 2)
-          if (workingMemoryState.size >= capacity) {
-            // Evict lowest priority slot
-            let lowestPriority = Infinity;
-            let lowestId = '';
-            for (const [id, s] of workingMemoryState) {
-              if (s.priority < lowestPriority) {
-                lowestPriority = s.priority;
-                lowestId = id;
-              }
-            }
-            if (lowestId) {
-              workingMemoryState.delete(lowestId);
+        // Check capacity (Miller's Law: 7 +/- 2). Only evict when adding a
+        // genuinely new slot, not when re-allocating an existing id.
+        if (!workingMemoryState.has(newId) && workingMemoryState.size >= capacity) {
+          // Evict lowest priority slot
+          let lowestPriority = Infinity;
+          let lowestId = '';
+          for (const [id, s] of workingMemoryState) {
+            if (s.priority < lowestPriority) {
+              lowestPriority = s.priority;
+              lowestId = id;
             }
           }
-
-          workingMemoryState.set(newId, newSlot);
-
-          output = {
-            action,
-            success: true,
-            state: {
-              slotsUsed: workingMemoryState.size,
-              capacity,
-              utilization: workingMemoryState.size / capacity,
-            },
-            details: {
-              slotId: newId,
-              avgPriority: calculateAvgPriority(),
-              interpretation: `Allocated new slot "${newId}" in working memory`,
-            },
-          };
-        } else {
-          return errorResult('Slot ID should not be provided for allocate action');
+          if (lowestId) {
+            workingMemoryState.delete(lowestId);
+          }
         }
+
+        workingMemoryState.set(newId, newSlot);
+
+        output = {
+          action,
+          success: true,
+          state: {
+            slotsUsed: workingMemoryState.size,
+            capacity,
+            utilization: workingMemoryState.size / capacity,
+          },
+          details: {
+            slotId: newId,
+            avgPriority: calculateAvgPriority(),
+            interpretation: `Allocated slot "${newId}" in working memory`,
+          },
+        };
         break;
       }
 
