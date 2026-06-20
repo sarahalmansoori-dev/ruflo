@@ -37,6 +37,11 @@ export interface MCPTool {
 export interface MCPToolResult {
   isError?: boolean;
   content: Array<{ type: 'text'; text: string }>;
+  // Legacy/ergonomic fields surfaced by the successResult/errorResult helpers
+  // (the MCP content/isError shape above is the canonical wire format).
+  success?: boolean;
+  data?: unknown;
+  error?: string;
   metadata?: {
     durationMs?: number;
     cached?: boolean;
@@ -603,6 +608,8 @@ export const OntologyNavigationInputSchema = z.object({
  */
 export function successResult<T>(data: T, metadata?: MCPToolResult['metadata']): MCPToolResult {
   return {
+    success: true,
+    data,
     content: [{ type: 'text', text: JSON.stringify(data) }],
     metadata,
   };
@@ -614,7 +621,9 @@ export function successResult<T>(data: T, metadata?: MCPToolResult['metadata']):
 export function errorResult(error: string | Error, metadata?: MCPToolResult['metadata']): MCPToolResult {
   const message = error instanceof Error ? error.message : error;
   return {
+    success: false,
     isError: true,
+    error: message,
     content: [{ type: 'text', text: JSON.stringify({ error: message, timestamp: new Date().toISOString() }) }],
     metadata,
   };
