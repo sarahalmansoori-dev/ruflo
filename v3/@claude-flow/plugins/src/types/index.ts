@@ -28,6 +28,10 @@ export interface PluginMetadata {
   readonly minCoreVersion?: string;
   readonly maxCoreVersion?: string;
   readonly tags?: string[];
+  /** Stable machine identifier (distinct from the human-readable name). */
+  readonly id?: string;
+  /** High-level capability labels advertised by the plugin. */
+  readonly capabilities?: readonly string[];
 }
 
 // ============================================================================

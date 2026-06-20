@@ -337,7 +337,9 @@ async function getOptimizer(): Promise<MCPToolOptimizer> {
   return optimizerInstance;
 }
 
-export const mcpToolOptimizerPlugin = new PluginBuilder('mcp-tool-optimizer', '1.0.0')
+export const mcpToolOptimizerPlugin = new PluginBuilder('RuVector MCP Tool Optimizer', '1.0.0')
+  .withId('ruvector-mcp-tool-optimizer')
+  .withCapabilities(['optimization', 'learning'])
   .withDescription('Learn tool patterns and suggest optimal sequences using @ruvector/wasm + @ruvector/learning-wasm')
   .withAuthor('Claude Flow Team')
   .withTags(['optimization', 'tools', 'patterns', 'ruvector', 'learning', 'hnsw'])

@@ -115,6 +115,16 @@ export class PluginBuilder {
     return this;
   }
 
+  withId(id: string): this {
+    this.metadata = { ...this.metadata, id };
+    return this;
+  }
+
+  withCapabilities(capabilities: string[]): this {
+    this.metadata = { ...this.metadata, capabilities };
+    return this;
+  }
+
   withMinCoreVersion(minCoreVersion: string): this {
     this.metadata = { ...this.metadata, minCoreVersion };
     return this;

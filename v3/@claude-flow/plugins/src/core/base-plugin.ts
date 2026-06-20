@@ -374,6 +374,16 @@ class SimplePlugin extends BasePlugin {
     this._config = config;
   }
 
+  /** Declarative view of the plugin's MCP tools (mirrors registerMCPTools()). */
+  get tools(): MCPToolDefinition[] {
+    return this._config.mcpTools ?? [];
+  }
+
+  /** Declarative view of the plugin's hooks (mirrors registerHooks()). */
+  get hooks(): HookDefinition[] {
+    return this._config.hooks ?? [];
+  }
+
   protected async onInitialize(): Promise<void> {
     if (this._config.onInitialize) {
       await this._config.onInitialize(this.context);
