@@ -1,5 +1,7 @@
 # ADR Implementation Status Summary
 
+> ⚠️ **Historical snapshot — superseded.** This is a point-in-time status record (2026-01-14, alpha.117) retained for history. For current, verified performance numbers, the **root `CLAUDE.md`** and [`docs/reviews/intelligence-system-audit-2026-05-29.md`](../../docs/reviews/intelligence-system-audit-2026-05-29.md) are the source of truth. In particular, the **HNSW "150x-12,500x" figure below was NOT reproduced** (measured ~1.9x–4.7x vs brute force, recall@10 ~0.99 — the original was a brute-force fallback), and **Flash Attention "2.49x-7.47x" remains unverified** (no standing benchmark). The benchmark tables below are left unedited as a historical record of what was claimed at the time.
+
 **Last Updated:** 2026-01-14
 **V3 Version:** 3.0.0-alpha.117 (CLI) / 3.0.0-alpha.76 (umbrella)
 **Status:** ✅ **BETA READY** (with REAL neural features - SONA, EWC++, MoE, Flash Attention, LoRA)

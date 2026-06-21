@@ -13,8 +13,8 @@ Claude Flow V3 is a next-generation AI agent coordination system built on 10 Arc
 
 V3 represents a complete architectural overhaul:
 - **10x faster testing** with Vitest
-- **150x-12,500x faster search** with HNSW indexing
-- **2.49x-7.47x Flash Attention speedup**
+- **~1.9x–4.7x faster search** vs brute force with HNSW indexing (measured, recall@10 ~0.99; the legacy "150x-12,500x" figure was a brute-force fallback and not reproduced)
+- **Flash Attention** integration (claimed 2.49x-7.47x speedup is unverified — no benchmark exists yet)
 - **50-75% memory reduction**
 
 ## Features
@@ -43,8 +43,8 @@ V3 represents a complete architectural overhaul:
 | Event Bus (100k events) | <50ms | ~6ms |
 | Map Lookup (100k gets) | <20ms | ~16ms |
 | Array.find vs Map O(1) | N/A | 978x speedup |
-| Flash Attention | 2.49x-7.47x | Validated |
-| AgentDB Search | 150x-12,500x | HNSW indexed |
+| Flash Attention | 2.49x-7.47x (target) | Unverified — no benchmark exists |
+| AgentDB Search | 150x-12,500x (legacy claim) | ~1.9x–4.7x vs brute force (measured; legacy figure not reproduced) |
 
 ## Architecture
 
@@ -219,7 +219,7 @@ const valid = await hasher.verify('password', hash);
 ```
 
 ### @claude-flow/memory
-Unified memory service with AgentDB, HNSW indexing, and 150x-12,500x faster search.
+Unified memory service with AgentDB and HNSW indexing (measured ~1.9x–4.7x vs brute force).
 
 ```typescript
 import { HybridMemoryRepository, HNSWIndex } from '@claude-flow/memory';
@@ -436,8 +436,8 @@ pnpm test:coverage
 
 | Category | Metric | Target |
 |----------|--------|--------|
-| **Search** | AgentDB HNSW | 150x-12,500x faster |
-| **Attention** | Flash Attention | 2.49x-7.47x speedup |
+| **Search** | AgentDB HNSW | 150x-12,500x aspirational (measured ~1.9x–4.7x vs brute force) |
+| **Attention** | Flash Attention | 2.49x-7.47x target (unverified) |
 | **Memory** | Reduction | 50-75% |
 | **Code** | Total lines | <5,000 |
 | **Startup** | Cold start | <500ms |
