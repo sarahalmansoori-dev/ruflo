@@ -73,12 +73,16 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Run all tests
-        run: npm test || echo "⚠️ Some tests failed (Jest teardown issues - non-blocking)"
+        # Surface failures (the step is reported failed/annotated) while keeping
+        # them non-blocking via continue-on-error. Previously `|| echo ...` forced
+        # exit 0, rendering failing tests as green and hiding the signal entirely.
+        # (Suite runs on vitest; the old "Jest teardown" note was stale.)
+        run: npm test
         continue-on-error: true
 
       - name: Generate coverage report
         if: matrix.os == 'ubuntu-latest'
-        run: npm run test:coverage || echo "⚠️ Coverage generation failed (non-blocking)"
+        run: npm run test:coverage
         continue-on-error: true
 
       - name: Upload test results
