@@ -206,7 +206,7 @@ describe('generateAgentsMd', () => {
 
       expect(result).toContain('## Performance Targets');
       expect(result).toContain('HNSW Search');
-      expect(result).toContain('150x-12,500x faster');
+      expect(result).toContain('~1.9x-4.7x vs brute force (measured)');
     });
 
     it('should include testing section', async () => {
