@@ -290,10 +290,19 @@ export class SafeExecutor {
   }
 
   /**
-   * Sanitizes a single argument.
+   * Sanitizes a single argument by stripping null bytes and shell
+   * metacharacters.
+   *
+   * ⚠️ SECURITY: this is **best-effort, blocklist-based** sanitization and must
+   * NOT be relied on as the sole defense in a shell context. Stripping
+   * characters can still leave dangerous input (e.g. argument splitting, option
+   * injection). The safe path is {@link execute}, which validates against the
+   * command allowlist and spawns with `shell: false` (no shell interpretation)
+   * via `execFile`. Prefer validation + `shell: false` over sanitizing for a
+   * shell.
    *
    * @param arg - Argument to sanitize
-   * @returns Sanitized argument
+   * @returns Sanitized argument (best-effort)
    */
   sanitizeArgument(arg: string): string {
     // Remove null bytes
