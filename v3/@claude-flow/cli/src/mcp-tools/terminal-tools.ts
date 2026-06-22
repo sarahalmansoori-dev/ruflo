@@ -80,6 +80,45 @@ function saveTerminalStore(store: TerminalStore): void {
   );
 }
 
+/**
+ * Optional command allowlist for terminal_execute (security audit finding #5).
+ *
+ * terminal_execute runs the supplied command through a shell (execSync), so it
+ * is an intentional arbitrary-command-execution surface — that is its documented
+ * trust boundary. By default behaviour is unchanged (any command runs). Operators
+ * who want defence-in-depth can set CLAUDE_FLOW_TERMINAL_ALLOWLIST to a
+ * comma-separated list of permitted command binaries; when set, any command whose
+ * binary is not on the list is refused *before* it reaches the shell.
+ */
+function getTerminalAllowlist(): string[] | null {
+  const raw = process.env.CLAUDE_FLOW_TERMINAL_ALLOWLIST;
+  if (!raw || !raw.trim()) return null;
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** Extract the binary name (basename of the first token) from a shell command. */
+function commandBinary(command: string): string {
+  const firstToken = command.trim().split(/\s+/)[0] || '';
+  // Strip any directory so "/usr/bin/node" and "node" both resolve to "node".
+  return firstToken.split(/[\\/]/).pop() || firstToken;
+}
+
+/**
+ * Decide whether a terminal command may run. Returns { allowed: true } when no
+ * allowlist is configured (default) or the command's binary is permitted, and
+ * { allowed: false, reason } when an allowlist is set and the binary is not on it.
+ */
+export function checkTerminalCommandAllowed(command: string): { allowed: boolean; reason?: string } {
+  const allowlist = getTerminalAllowlist();
+  if (!allowlist) return { allowed: true };
+  const bin = commandBinary(command);
+  if (allowlist.includes(bin)) return { allowed: true };
+  return {
+    allowed: false,
+    reason: `Command '${bin}' is not permitted by CLAUDE_FLOW_TERMINAL_ALLOWLIST (allowed: ${allowlist.join(', ')})`,
+  };
+}
+
 export const terminalTools: MCPTool[] = [
   {
     name: 'terminal_create',
@@ -138,7 +177,7 @@ export const terminalTools: MCPTool[] = [
   },
   {
     name: 'terminal_execute',
-    description: 'Execute a command in a terminal session Use when native Bash is wrong because you need a persistent terminal session across turns/agents with output capture and replay. For one-shot shell commands, native Bash is fine.',
+    description: 'Execute a command in a terminal session. SECURITY: the command is run through a shell (arbitrary command execution) — this is the trust boundary. Operators can restrict it by setting CLAUDE_FLOW_TERMINAL_ALLOWLIST to a comma-separated list of permitted command binaries. Use when native Bash is wrong because you need a persistent terminal session across turns/agents with output capture and replay. For one-shot shell commands, native Bash is fine.',
     category: 'terminal',
     inputSchema: {
       type: 'object',
@@ -154,6 +193,11 @@ export const terminalTools: MCPTool[] = [
       // Validate user-provided input (#1425)
       const vCmd = validateText(input.command, 'command', 10_000);
       if (!vCmd.valid) return { success: false, error: vCmd.error };
+      // Defence-in-depth (security audit finding #5): when an operator has
+      // configured CLAUDE_FLOW_TERMINAL_ALLOWLIST, refuse any command whose
+      // binary is not permitted before it reaches the shell. No-op by default.
+      const allow = checkTerminalCommandAllowed(input.command as string);
+      if (!allow.allowed) return { success: false, error: allow.reason };
       if (input.sessionId) {
         const v = validateIdentifier(input.sessionId, 'sessionId');
         if (!v.valid) return { success: false, error: v.error };
