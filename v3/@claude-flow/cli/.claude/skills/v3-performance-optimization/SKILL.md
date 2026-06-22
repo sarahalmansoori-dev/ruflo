@@ -1,6 +1,6 @@
 ---
 name: "V3 Performance Optimization"
-description: "Achieve aggressive v3 performance targets: 2.49x-7.47x Flash Attention speedup, 150x-12,500x search improvements, 50-75% memory reduction. Comprehensive benchmarking and optimization suite."
+description: "Achieve aggressive v3 performance targets: Flash Attention (speedup unverified), HNSW search (measured ~1.9x-4.7x vs brute force), 50-75% memory reduction. Comprehensive benchmarking and optimization suite."
 ---
 
 # V3 Performance Optimization

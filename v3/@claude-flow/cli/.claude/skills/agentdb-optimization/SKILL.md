@@ -1,6 +1,6 @@
 ---
 name: "AgentDB Performance Optimization"
-description: "Optimize AgentDB performance with quantization (4-32x memory reduction), HNSW indexing (150x faster search), caching, and batch operations. Use when optimizing memory usage, improving search speed, or scaling to millions of vectors."
+description: "Optimize AgentDB performance with quantization (4-32x memory reduction), HNSW indexing (measured ~1.9x-4.7x vs brute force), caching, and batch operations. Use when optimizing memory usage, improving search speed, or scaling to millions of vectors."
 ---
 
 # AgentDB Performance Optimization
