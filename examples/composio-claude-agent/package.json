@@ -1,0 +1,17 @@
+{
+  "name": "composio-claude-agent-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Give a Claude Agent SDK agent access to Composio's 1000+ app tools over MCP",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "@composio/core": "^0.14.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
