@@ -53,6 +53,16 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "Bash|Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @nizos/probity --agent claude-code --config \"$CLAUDE_PROJECT_DIR/config/probity.config.ts\"",
+            "statusMessage": "Probity: checking TDD rules..."
+          }
+        ]
       }
     ],
     "PostToolUse": [

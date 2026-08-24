@@ -106,6 +106,7 @@
     "ws": ">=8.18.4"
   },
   "devDependencies": {
+    "@nizos/probity": "^1.10.0",
     "@openai/codex": "^0.98.0",
     "@types/bcrypt": "^5.0.2",
     "@types/node": "^20.0.0",
