@@ -53,10 +53,16 @@ readd playwright -- npx -y @playwright/mcp@latest
 #    on first use; run /mcp inside Claude Code to complete sign-in.
 readd composio -t http https://connect.composio.dev/mcp
 
-# 3. Firecrawl — web scraping and crawling. The remote endpoint carries the
-#    API key in the path.
+# 3. Firecrawl — web scraping and crawling. Firecrawl's remote endpoint takes
+#    the API key in the URL path. If your dashboard shows a bearer-token
+#    endpoint instead, set FIRECRAWL_MCP_AUTH=header to switch forms.
 if [[ -n "${FIRECRAWL_API_KEY:-}" ]]; then
-  readd firecrawl -t http "https://mcp.firecrawl.dev/${FIRECRAWL_API_KEY}/v2/mcp"
+  if [[ "${FIRECRAWL_MCP_AUTH:-path}" == "header" ]]; then
+    readd firecrawl -t http https://mcp.firecrawl.dev/v2/mcp \
+      -H "Authorization: Bearer ${FIRECRAWL_API_KEY}"
+  else
+    readd firecrawl -t http "https://mcp.firecrawl.dev/${FIRECRAWL_API_KEY}/v2/mcp"
+  fi
 else
   skipped+=("firecrawl (set FIRECRAWL_API_KEY)")
 fi
