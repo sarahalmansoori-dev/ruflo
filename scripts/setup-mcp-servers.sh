@@ -4,7 +4,9 @@
 # Idempotent: existing entries with the same name are replaced.
 # Secrets are read from the environment and are never written to the repo.
 #
-#   FIRECRAWL_API_KEY   free key from https://firecrawl.dev  (optional)
+#   FIRECRAWL_API_KEY   free key from https://firecrawl.dev  (only for
+#                       FIRECRAWL_MCP_AUTH=apikey; the default OAuth mode
+#                       needs no key)
 #   PERPLEXITY_API_KEY  paid key from https://perplexity.ai  (optional)
 #
 # Usage:
@@ -36,7 +38,7 @@ esac
 
 command -v claude >/dev/null 2>&1 || { echo "claude CLI not found on PATH" >&2; exit 1; }
 
-added=() skipped=()
+added=() skipped=() notes=()
 
 # Replace any existing entry so re-runs converge on the config below.
 readd() {
@@ -53,19 +55,33 @@ readd playwright -- npx -y @playwright/mcp@latest
 #    on first use; run /mcp inside Claude Code to complete sign-in.
 readd composio -t http https://connect.composio.dev/mcp
 
-# 3. Firecrawl — web scraping and crawling. Firecrawl's remote endpoint takes
-#    the API key in the URL path. If your dashboard shows a bearer-token
-#    endpoint instead, set FIRECRAWL_MCP_AUTH=header to switch forms.
-if [[ -n "${FIRECRAWL_API_KEY:-}" ]]; then
-  if [[ "${FIRECRAWL_MCP_AUTH:-path}" == "header" ]]; then
-    readd firecrawl -t http https://mcp.firecrawl.dev/v2/mcp \
-      -H "Authorization: Bearer ${FIRECRAWL_API_KEY}"
-  else
-    readd firecrawl -t http "https://mcp.firecrawl.dev/${FIRECRAWL_API_KEY}/v2/mcp"
-  fi
-else
-  skipped+=("firecrawl (set FIRECRAWL_API_KEY)")
-fi
+# 3. Firecrawl — web scraping and crawling.
+#
+#    Firecrawl publishes two endpoints and is explicit that the API key never
+#    belongs in the URL (firecrawl/firecrawl-mcp-server README):
+#
+#      /v2/mcp-oauth  interactive account connection; needs no key at all
+#      /v2/mcp        unattended use; key goes in an Authorization header
+#
+#    OAuth is the default because it keeps the key out of shell history, the
+#    process table and this repo. Set FIRECRAWL_MCP_AUTH=apikey for unattended
+#    hosts with no browser.
+case "${FIRECRAWL_MCP_AUTH:-oauth}" in
+  oauth)
+    readd firecrawl -t http https://mcp.firecrawl.dev/v2/mcp-oauth
+    notes+=("firecrawl: run 'claude mcp login firecrawl' to connect your account")
+    ;;
+  apikey)
+    if [[ -n "${FIRECRAWL_API_KEY:-}" ]]; then
+      readd firecrawl -t http https://mcp.firecrawl.dev/v2/mcp \
+        -H "Authorization: Bearer ${FIRECRAWL_API_KEY}"
+    else
+      skipped+=("firecrawl (FIRECRAWL_MCP_AUTH=apikey needs FIRECRAWL_API_KEY)")
+    fi
+    ;;
+  *)
+    echo "FIRECRAWL_MCP_AUTH must be 'oauth' or 'apikey'" >&2; exit 2 ;;
+esac
 
 # 4. Perplexity — search and research. Paid API key, bearer auth.
 if [[ -n "${PERPLEXITY_API_KEY:-}" ]]; then
@@ -79,6 +95,10 @@ printf 'configured (scope=%s): %s\n' "$SCOPE" "${added[*]}"
 if [[ ${#skipped[@]} -gt 0 ]]; then
   printf 'skipped:\n'
   printf '  - %s\n' "${skipped[@]}"
+fi
+if [[ ${#notes[@]} -gt 0 ]]; then
+  printf 'next steps:\n'
+  printf '  - %s\n' "${notes[@]}"
 fi
 
 echo
