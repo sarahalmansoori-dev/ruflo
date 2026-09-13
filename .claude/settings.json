@@ -277,9 +277,16 @@
         "mcp",
         "start"
       ]
+    },
+    "office-mcp": {
+      "command": "node",
+      "args": [
+        ".claude/mcp-servers/office-mcp/dist/index.js"
+      ]
     }
   },
   "enabledMcpjsonServers": [
-    "claude-flow"
+    "claude-flow",
+    "office-mcp"
   ]
 }
