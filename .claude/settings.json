@@ -268,17 +268,6 @@
     "type": "command",
     "command": "sh -c 'exec node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/statusline.cjs\"'"
   },
-  "mcpServers": {
-    "claude-flow": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "ruflo@latest",
-        "mcp",
-        "start"
-      ]
-    }
-  },
   "enabledMcpjsonServers": [
     "claude-flow"
   ]
