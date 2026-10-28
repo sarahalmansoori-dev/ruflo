@@ -5,6 +5,12 @@
       "command": "markitdown-mcp",
       "args": [],
       "env": {}
+    },
+    "claude-flow": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "claude-flow@3.63.6", "mcp", "start"],
+      "env": {}
     }
   }
 }
